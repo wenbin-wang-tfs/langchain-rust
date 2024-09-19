@@ -1,8 +1,12 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
+use rusqlite::params;
 use serde_json::{json, Value};
-use sqlx::{Pool, Row, Sqlite};
 
 use crate::{
     embedding::embedder_trait::Embedder,
@@ -11,7 +15,7 @@ use crate::{
 };
 
 pub struct Store {
-    pub(crate) pool: Pool<Sqlite>,
+    pub(crate) pool: Arc<Mutex<rusqlite::Connection>>,
     pub(crate) table: String,
     pub(crate) vector_dimensions: i32,
     pub(crate) embedder: Arc<dyn Embedder>,
@@ -25,9 +29,11 @@ impl Store {
 
     async fn create_table_if_not_exists(&self) -> Result<(), Box<dyn Error>> {
         let table = &self.table;
+        let db = &self.pool.lock().unwrap();
 
-        sqlx::query(&format!(
-            r#"
+        db.execute(
+            &format!(
+                r#"
                 CREATE TABLE IF NOT EXISTS {table}
                 (
                   rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,35 +43,37 @@ impl Store {
                 )
                 ;
                 "#
-        ))
-        .execute(&self.pool)
-        .await?;
+            ),
+            (),
+        )?;
 
         let dimensions = self.vector_dimensions;
-        sqlx::query(&format!(
-            r#"
-                CREATE VIRTUAL TABLE IF NOT EXISTS vss_{table} USING vss0(
-                  text_embedding({dimensions})
+
+        db.execute(
+            &format!(
+                r#"
+                CREATE VIRTUAL TABLE IF NOT EXISTS vec_{table} USING vec0(
+                text_embedding float[{dimensions}],
                 );
                 "#
-        ))
-        .execute(&self.pool)
-        .await?;
+            ),
+            (),
+        )?;
 
-        // NOTE: python langchain seems to only use "embed_text" as the trigger name
-        sqlx::query(&format!(
-            r#"
+        db.execute(
+            &format!(
+                r#"
                 CREATE TRIGGER IF NOT EXISTS embed_text_{table}
                 AFTER INSERT ON {table}
                 BEGIN
-                    INSERT INTO vss_{table}(rowid, text_embedding)
+                    INSERT INTO vec_{table}(rowid, text_embedding)
                     VALUES (new.rowid, new.text_embedding)
                     ;
                 END;
                 "#
-        ))
-        .execute(&self.pool)
-        .await?;
+            ),
+            (),
+        )?;
 
         Ok(())
     }
@@ -92,30 +100,36 @@ impl VectorStore for Store {
 
         let table = &self.table;
 
-        let mut tx = self.pool.begin().await?;
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
 
         let mut ids = Vec::with_capacity(docs.len());
 
         for (doc, vector) in docs.iter().zip(vectors.iter()) {
-            let text_embedding = json!(&vector);
-            let id = sqlx::query(&format!(
-                r#"
+            let text_embedding = json!(&vector).to_string();
+
+            let id: i64 = tx
+                .execute(
+                    &format!(
+                        r#"
                     INSERT INTO {table}
                         (text, metadata, text_embedding)
                     VALUES
-                        (?,?,?)"#
-            ))
-            .bind(&doc.page_content)
-            .bind(json!(&doc.metadata))
-            .bind(text_embedding.to_string())
-            .execute(&mut *tx)
-            .await?
-            .last_insert_rowid();
+                        (?, ?, ?)"#
+                    ),
+                    params![
+                        &doc.page_content,
+                        &json!(doc.metadata).to_string(),
+                        &text_embedding
+                    ],
+                )?
+                .try_into()
+                .unwrap();
 
             ids.push(id.to_string());
         }
 
-        tx.commit().await?;
+        tx.commit()?;
 
         Ok(ids)
     }
@@ -128,47 +142,94 @@ impl VectorStore for Store {
     ) -> Result<Vec<Document>, Box<dyn Error>> {
         let table = &self.table;
 
-        let query_vector = json!(self.embedder.embed_query(query).await?);
+        let query_vector = self.embedder.embed_query(query).await?;
+        let db = self.pool.lock().unwrap();
+        let dimensions = self.vector_dimensions;
 
-        let rows = sqlx::query(&format!(
-            r#"SELECT
-                    text,
-                    metadata,
+        let query = &format!(
+            r#"WITH coarse_results AS (
+                SELECT
+                    rowid,
+                    text_embedding,
                     distance
-                FROM {table} e
-                INNER JOIN vss_{table} v on v.rowid = e.rowid
-                WHERE vss_search(
-                  v.text_embedding,
-                  vss_search_params('{query_vector}', ?)
-                )
-                LIMIT ?"#
-        ))
-        .bind(limit as i32)
-        .bind(limit as i32)
-        .fetch_all(&self.pool)
-        .await?;
+                FROM vec_{table}
+                WHERE text_embedding MATCH vec_normalize(?)
+                ORDER BY distance
+                LIMIT 100
+            )
+            SELECT
+                t.text,
+                t.metadata,
+                c.distance
+            FROM {table} t
+            INNER JOIN coarse_results c ON t.rowid = c.rowid
+            ORDER BY vec_distance_l2(?, c.text_embedding)
+            LIMIT ?;"#,
+        );
+        let mut stmt = db.prepare(query)?;
+        let query_vector: Vec<f64> = query_vector
+            .iter()
+            .take(dimensions as usize)
+            .cloned()
+            .collect();
+        let query_vector_string = json!(query_vector).to_string();
+        let docs = stmt
+            .query_map(
+                params![query_vector_string, query_vector_string, limit.to_string()],
+                |row| {
+                    let page_content: String = row.get("text")?;
+                    let metadata_json: String = row.get("metadata")?;
+                    let score: f64 = row.get("distance")?;
 
-        let docs = rows
-            .into_iter()
-            .map(|row| {
-                let page_content: String = row.try_get("text")?;
-                let metadata_json: Value = row.try_get("metadata")?;
-                let score: f64 = row.try_get("distance")?;
+                    let metadata: HashMap<String, Value> =
+                        serde_json::from_str(&metadata_json).unwrap();
 
-                let metadata = if let Value::Object(obj) = metadata_json {
-                    obj.into_iter().collect()
-                } else {
-                    HashMap::new() // Or handle this case as needed
-                };
-
-                Ok(Document {
-                    page_content,
-                    metadata,
-                    score,
-                })
-            })
-            .collect::<Result<Vec<Document>, sqlx::Error>>()?;
+                    Ok(Document {
+                        page_content,
+                        metadata,
+                        score,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<Document>, rusqlite::Error>>()?;
 
         Ok(docs)
+    }
+}
+
+impl Store {
+    pub async fn delete_documents_by_ids(&self, ids: &[i64]) -> Result<(), Box<dyn Error>> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let table = &self.table;
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
+
+        let query = format!(
+            r#"
+                    DELETE FROM {table}
+                    WHERE rowid IN ({placeholders})
+                "#
+        );
+
+        tx.execute(&query, rusqlite::params_from_iter(ids))?;
+
+        let vss_table = format!("vec_{}", table);
+        let vss_query = format!(
+            r#"
+                    DELETE FROM {vss_table}
+                    WHERE rowid IN ({placeholders})
+                "#
+        );
+
+        tx.execute(&vss_query, rusqlite::params_from_iter(ids))?;
+
+        tx.commit()?;
+
+        Ok(())
     }
 }
