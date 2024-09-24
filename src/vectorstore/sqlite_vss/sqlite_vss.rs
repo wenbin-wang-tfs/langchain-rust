@@ -109,19 +109,21 @@ impl VectorStore for Store {
             let text_embedding = json!(&vector).to_string();
 
             let id: i64 = tx
-                .execute(
+                .query_row(
                     &format!(
                         r#"
                     INSERT INTO {table}
                         (text, metadata, text_embedding)
                     VALUES
-                        (?, ?, ?)"#
+                        (?, ?, ?)
+                    RETURNING rowid"#
                     ),
                     params![
                         &doc.page_content,
                         &json!(doc.metadata).to_string(),
                         &text_embedding
                     ],
+                    |row| row.get::<_, i64>(0),
                 )?
                 .try_into()
                 .unwrap();
