@@ -234,4 +234,35 @@ impl Store {
 
         Ok(())
     }
+
+    pub async fn delete_all_documents(&self) -> Result<(), Box<dyn Error>> {
+        let table = &self.table;
+
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
+
+        tx.execute(
+            &format!(
+                r#"
+                    DELETE FROM {table}
+                "#
+            ),
+            (),
+        )?;
+
+        let vss_table = format!("vec_{}", table);
+
+        tx.execute(
+            &format!(
+                r#"
+                    DELETE FROM {vss_table}
+                "#
+            ),
+            (),
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
+    }
 }
