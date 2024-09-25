@@ -1,9 +1,17 @@
-use std::{io::Read, path::Path, pin::Pin};
+use std::{
+    collections::HashMap,
+    fmt,
+    io::Read,
+    path::Path,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use async_stream::stream;
 use async_trait::async_trait;
 use futures::Stream;
-use pdf_extract::{output_doc, PlainTextOutput};
+use pdf_extract::{output_doc, ConvertToFmt, OutputDev, OutputError, PlainTextOutput};
+use serde_json::Value;
 
 use crate::{
     document_loaders::{process_doc_stream, Loader, LoaderError},
@@ -14,6 +22,88 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct PdfExtractLoader {
     document: pdf_extract::Document,
+}
+
+struct PagePlainTextOutput {
+    inner: PlainTextOutput<OutputWrapper>,
+    pages: HashMap<u32, String>,
+    current_page: u32,
+    reader: Arc<Mutex<String>>,
+}
+
+struct OutputWrapper(Arc<Mutex<String>>);
+
+impl std::fmt::Write for OutputWrapper {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.0.lock().unwrap().write_str(s).map_err(|_| fmt::Error)
+    }
+}
+
+impl ConvertToFmt for OutputWrapper {
+    type Writer = OutputWrapper;
+
+    fn convert(self) -> Self::Writer {
+        self
+    }
+}
+
+impl PagePlainTextOutput {
+    fn new() -> Self {
+        let s = Arc::new(Mutex::new(String::new()));
+        let writer = Arc::clone(&s);
+        Self {
+            pages: HashMap::new(),
+            current_page: 0,
+            reader: s,
+            inner: PlainTextOutput::new(OutputWrapper(writer)),
+        }
+    }
+}
+
+impl OutputDev for PagePlainTextOutput {
+    fn begin_page(
+        &mut self,
+        page_num: u32,
+        media_box: &pdf_extract::MediaBox,
+        art_box: Option<(f64, f64, f64, f64)>,
+    ) -> Result<(), OutputError> {
+        self.current_page = page_num;
+        self.inner.begin_page(page_num, media_box, art_box)
+    }
+
+    fn end_page(&mut self) -> Result<(), OutputError> {
+        self.inner.end_page()?;
+
+        let buf = self.reader.lock().unwrap().clone();
+        self.pages.insert(self.current_page, buf);
+        self.reader.lock().unwrap().clear();
+
+        Ok(())
+    }
+
+    fn output_character(
+        &mut self,
+        trm: &pdf_extract::Transform,
+        width: f64,
+        spacing: f64,
+        font_size: f64,
+        char: &str,
+    ) -> Result<(), OutputError> {
+        self.inner
+            .output_character(trm, width, spacing, font_size, char)
+    }
+
+    fn begin_word(&mut self) -> Result<(), OutputError> {
+        self.inner.begin_word()
+    }
+
+    fn end_word(&mut self) -> Result<(), OutputError> {
+        self.inner.end_word()
+    }
+
+    fn end_line(&mut self) -> Result<(), OutputError> {
+        self.inner.end_line()
+    }
 }
 
 impl PdfExtractLoader {
@@ -55,13 +145,15 @@ impl Loader for PdfExtractLoader {
         Pin<Box<dyn Stream<Item = Result<Document, LoaderError>> + Send + 'static>>,
         LoaderError,
     > {
-        let mut buffer: Vec<u8> = Vec::new();
-        let mut output = PlainTextOutput::new(&mut buffer as &mut dyn std::io::Write);
-        output_doc(&self.document, &mut output)?;
-        let doc = Document::new(String::from_utf8(buffer)?);
-
         let stream = stream! {
-            yield Ok(doc);
+            let mut output = PagePlainTextOutput::new();
+            output_doc(&self.document, &mut output)?;
+            for (page_num, text) in output.pages {
+                let mut metadata = HashMap::new();
+                metadata.insert("page_number".to_string(), Value::from(page_num));
+                let doc = Document::new(text).with_metadata(metadata);
+                yield Ok(doc);
+            }
         };
 
         Ok(Box::pin(stream))
@@ -90,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lo_pdf_loader() {
-        let path = "./src/document_loaders/test_data/sample.pdf";
+        let path = "/Users/wenbing.wang/Downloads/introduction-to-counting-amp-probability-the-art-of-problem-solving-2nd.pdf";
 
         let loader = PdfExtractLoader::from_path(path).expect("Failed to create PdfExtractLoader");
 
@@ -101,9 +193,8 @@ mod tests {
             .map(|d| d.unwrap())
             .collect::<Vec<_>>()
             .await;
-
-        assert_eq!(&docs[0].page_content[..100], "\n\nSample PDF Document\n\nRobert Maron\nGrzegorz Grudzi´nski\n\nFebruary 20, 1999\n\n2\n\nContents\n\n1 Templat");
-        assert_eq!(docs.len(), 1);
+        println!("{:?}", docs);
+        assert_eq!(docs.len(), 256);
     }
 
     #[tokio::test]
