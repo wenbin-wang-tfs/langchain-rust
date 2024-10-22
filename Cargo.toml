@@ -83,6 +83,7 @@ sqlite-vec = "0.1.2"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 mistralai-client = { version = "0.14.0", optional = true }
 
+
 [features]
 default = ["sqlite","pdf-extract","lopdf"]
 fastembed = ["dep:fastembed"]
@@ -94,7 +95,8 @@ ollama = ["ollama-rs"]
 opensearch = ["dep:opensearch", "aws-config"]
 postgres = ["pgvector", "sqlx", "uuid"]
 qdrant = ["qdrant-client", "uuid"]
-sqlite = ["sqlx"]
+sqlite-vss = ["sqlx"]
+sqlite-vec = ["sqlx"]
 surrealdb = ["dep:surrealdb"]
 tree-sitter = [
     "cc",
