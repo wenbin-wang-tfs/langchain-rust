@@ -218,8 +218,9 @@ impl VectorStore for Store {
             eprintln!("prepare sql error: {}", err);
             query.to_string()
         });
-        let bm25_query = ai_bm25_response.chars()
-            .filter(|c| c.is_alphanumeric())
+        let bm25_query = ai_bm25_response
+            .chars()
+            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
             .collect::<String>();
         
         println!("bm25 key word: {}", bm25_query);
