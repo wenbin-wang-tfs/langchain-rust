@@ -9,9 +9,7 @@ use rusqlite::params;
 use serde_json::{json, Value};
 
 use crate::{
-    embedding::embedder_trait::Embedder,
-    schemas::Document,
-    vectorstore::{VecStoreOptions, VectorStore},
+    embedding::embedder_trait::Embedder, language_models::llm::LLM, schemas::Document, vectorstore::{VecStoreOptions, VectorStore}
 };
 
 pub struct Store {
@@ -19,6 +17,7 @@ pub struct Store {
     pub(crate) table: String,
     pub(crate) vector_dimensions: i32,
     pub(crate) embedder: Arc<dyn Embedder>,
+    pub(crate) llm: Arc<dyn LLM>,
 }
 
 impl Store {
@@ -75,7 +74,60 @@ impl Store {
             (),
         )?;
 
+        db.execute(
+            &format!(
+                r#"
+                CREATE VIRTUAL TABLE IF NOT EXISTS bm25_{table}
+                USING fts5(
+                  text,
+                  metadata,
+                );
+                "#
+            ),
+            (),
+        )?;
+
+        db.execute(
+            &format!(
+                r#"
+                CREATE TRIGGER IF NOT EXISTS bm25_{table}_insert_trigger
+                AFTER INSERT ON {table}
+                BEGIN
+                    INSERT INTO bm25_{table} (rowid, text,metadata)
+                    VALUES (new.rowid, new.text, new.metadata)
+                    ;
+                END;
+                "#
+            ),
+            (),
+        )?;
+
+        db.execute(
+            &format!(
+                r#"
+                CREATE TRIGGER IF NOT EXISTS bm25_{table}_delete_trigger
+                AFTER DELETE ON {table}
+                BEGIN
+                    DELETE FROM bm25_{table} WHERE rowid = old.rowid;
+                END;
+
+                "#
+            ),
+            (),
+        )?;
         Ok(())
+    }
+
+    fn get_filters(&self, opt: &VecStoreOptions) -> Result<HashMap<String, Value>, Box<dyn Error>> {
+        match &opt.filters {
+            Some(Value::Object(map)) => {
+                // Convert serde_json Map to HashMap<String, Value>
+                let filters = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                Ok(filters)
+            }
+            None => Ok(HashMap::new()), // No filters provided
+            _ => Err("Invalid filters format".into()), // Filters provided but not in the expected format
+        }
     }
 }
 
@@ -140,52 +192,115 @@ impl VectorStore for Store {
         &self,
         query: &str,
         limit: usize,
-        _opt: &VecStoreOptions,
+        opt: &VecStoreOptions,
     ) -> Result<Vec<Document>, Box<dyn Error>> {
         let table = &self.table;
-
-        let query_vector = self.embedder.embed_query(query).await?;
-        let db = self.pool.lock().unwrap();
-        let dimensions = self.vector_dimensions;
-
-        let query = &format!(
-            r#"WITH coarse_results AS (
-                SELECT
-                    rowid,
-                    text_embedding,
-                    distance
-                FROM vec_{table}
-                WHERE text_embedding MATCH vec_normalize(?)
-                ORDER BY distance
-                LIMIT 100
-            )
-            SELECT
-                t.text,
-                t.metadata,
-                c.distance
-            FROM {table} t
-            INNER JOIN coarse_results c ON t.rowid = c.rowid
-            ORDER BY vec_distance_l2(?, c.text_embedding)
-            LIMIT ?;"#,
+        let openai =  &self.llm;
+        let prompt = format!(
+            r#"
+            {{
+            "messages": [
+                {{
+                "role": "system",
+                "content": "Extract keywords user question full-text search fewer keywords ensure full-text search data keywords multiple keywords space separate Note keywords language"
+                }},
+                {{
+                "role": "user",
+                "content": "{}"
+                }}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 4096
+            }}"#,
+            query.to_string()
         );
-        let mut stmt = db.prepare(query)?;
-        let query_vector: Vec<f64> = query_vector
-            .iter()
-            .take(dimensions as usize)
-            .cloned()
-            .collect();
-        let query_vector_string = json!(query_vector).to_string();
+        let ai_bm25_response  = openai.invoke(&prompt).await.unwrap_or_else(|err| {
+            eprintln!("prepare sql error: {}", err);
+            query.to_string()
+        });
+        let bm25_query = ai_bm25_response.chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect::<String>();
+        
+        println!("bm25 key word: {}", bm25_query);
+
+        let query_vector_json = json!(self.embedder.embed_query(query).await?).to_string();
+        let db = self.pool.lock().unwrap();
+        
+        let filter = self.get_filters(opt)?;
+        let mut metadata_query = filter
+        .iter()
+        .map(|(k, v)| format!("json_extract(e.metadata, '$.{}') = '{}'", k, v))
+        .collect::<Vec<String>>()
+        .join(" AND ");
+
+        if metadata_query.is_empty() {
+            metadata_query = "1 = 1".to_string();
+        }
+        
+       
+
+        let query_sql = &format!(
+            r#"
+            with vec_matches as (
+                    select
+                    rowid,
+                    row_number() over (
+                    order by distance) as rank_number,
+                    distance
+                from
+                    vec_{table}
+                where
+                    text_embedding match ?
+                    and k = {limit} and  {metadata_query}
+                order by
+                    distance
+                ),
+            fts_matches as (
+                select
+                    rowid,
+                    row_number() OVER (ORDER BY rank) AS row_number,
+                    rank AS score
+                from
+                    bm25_{table}
+                where
+                    bm25_{table} match ?
+                    order by score
+                    limit {limit}
+                ),
+            final as (
+                    SELECT
+                        items.rowid,
+                        items.text,
+                        items.metadata,
+                        vec_matches.distance AS vec_score,
+                        fts_matches.score AS bm25_score,
+                        COALESCE(1.0 / (60 + fts_matches.row_number), 0.0) * 1.0 +
+                        COALESCE(1.0 / (60 + vec_matches.rank_number), 0.0) * 1.0 AS combined_score
+                    FROM
+                        fts_matches
+                    FULL OUTER JOIN vec_matches ON vec_matches.rowid = fts_matches.rowid
+                    JOIN {table} items ON COALESCE(fts_matches.rowid, vec_matches.rowid) = items.rowid
+                    ORDER BY combined_score 
+                )
+            select * from final order by combined_score DESC;
+            "#,
+        );
+        let mut stmt = db.prepare(query_sql)?;
+        
         let docs = stmt
             .query_map(
-                params![query_vector_string, query_vector_string, limit.to_string()],
+                params![query_vector_json,bm25_query],
                 |row| {
                     let page_content: String = row.get("text")?;
                     let metadata_json: String = row.get("metadata")?;
-                    let score: f64 = row.get("distance")?;
-
-                    let metadata: HashMap<String, Value> =
+                    let score: f64 = row.get::<_, Option<f64>>("combined_score")?.unwrap_or_default();
+                    let vec_score: f64 = row.get::<_, Option<f64>>("vec_score")?.unwrap_or_default();
+                    let bm25_score: f64 = row.get::<_, Option<f64>>("bm25_score")?.unwrap_or_default();
+                    let mut metadata: HashMap<String, Value> =
                         serde_json::from_str(&metadata_json).unwrap();
-
+                    metadata.insert("bm25_score".to_string(), json!(bm25_score));
+                    metadata.insert("vec_score".to_string(), json!(vec_score));
                     Ok(Document {
                         page_content,
                         metadata,
@@ -194,7 +309,6 @@ impl VectorStore for Store {
                 },
             )?
             .collect::<Result<Vec<Document>, rusqlite::Error>>()?;
-
         Ok(docs)
     }
 }

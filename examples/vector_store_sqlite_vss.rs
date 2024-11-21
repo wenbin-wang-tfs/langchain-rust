@@ -17,16 +17,29 @@ use std::io::Write;
 #[tokio::main]
 async fn main() {
     // Initialize Embedder
-    let embedder = OpenAiEmbedder::default();
 
-    let database_url = std::env::var("DATABASE_URL").unwrap_or("sqlite::memory:".to_string());
+    use langchain_rust::llm::{AzureConfig, OpenAI};
+    use langchain_rust::{
+        language_models::llm::LLM,
+    };
+
+    let azure_config = AzureConfig::default();
+       
+    let embedder = OpenAiEmbedder::new(azure_config);
+
+    let azure_config = AzureConfig::default();
+       
+    let open_ai = OpenAI::new(azure_config);
+
+    // let database_url = std::env::var();
 
     // Initialize the Sqlite Vector Store
     let store = StoreBuilder::new()
         .embedder(embedder)
-        .connection_url(database_url)
-        .table("documents")
-        .vector_dimensions(1536)
+        .llm(open_ai)
+        .connection_url("/Users/zhaoxin.jia/Library/Application Support/com.thermofisher.geneaiapac.assistant/vector_store.db")
+        .table("documentstest1")
+        .vector_dimensions(3072)
         .build()
         .await
         .unwrap();
@@ -53,21 +66,30 @@ async fn main() {
 
     // Ask for user input
     print!("Query> ");
-    std::io::stdout().flush().unwrap();
-    let mut query = String::new();
-    std::io::stdin().read_line(&mut query).unwrap();
+    // std::io::stdout().flush().unwrap();
+    // let mut query = String::new();
+    // std::io::stdin().read_line(&mut query).unwrap();
 
     let results = store
-        .similarity_search(&query, 2, &VecStoreOptions::default())
+        .similarity_search("how can i use langchain rust", 4, &VecStoreOptions::default())
         .await
-        .unwrap();
+        .unwrap_or_else(|err| {
+            eprintln!("Error during similarity search: {}", err);
+            std::process::exit(1);
+        });
 
     if results.is_empty() {
         println!("No results found.");
         return;
     } else {
         results.iter().for_each(|r| {
-            println!("Document: {}", r.page_content);
+            println!("Document: {},combined_score:{}", r.page_content,r.score);
+            if let Some(vec_score) = r.metadata.get("vec_score") {
+                println!("combined_score: {}", vec_score);
+            }
+            if let Some(bm25_score) = r.metadata.get("bm25_score") {
+                println!("bm25_score: {}", bm25_score);
+            }
         });
     }
 }
