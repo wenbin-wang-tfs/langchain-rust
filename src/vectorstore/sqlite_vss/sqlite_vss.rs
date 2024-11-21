@@ -202,7 +202,7 @@ impl VectorStore for Store {
             "messages": [
                 {{
                 "role": "system",
-                "content": "Extract keywords user question full-text search fewer keywords ensure full-text search data keywords multiple keywords space separate Note keywords language"
+                "content": "extract keywords from the user's question, I need to do a full-text search for this keyword, and I want you to return  a maximum of two keywords in order of importance. To make sure my full-text search can query the data, I just need to return the keywords, and the multiple keywords are separated by a space. Pay attention to the language of the keywords"
                 }},
                 {{
                 "role": "user",
