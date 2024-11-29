@@ -7,9 +7,11 @@ use std::{
 use async_trait::async_trait;
 use rusqlite::params;
 use serde_json::{json, Value};
-
 use crate::{
-    embedding::embedder_trait::Embedder, language_models::llm::LLM, schemas::Document, vectorstore::{VecStoreOptions, VectorStore}
+    embedding::embedder_trait::Embedder,
+    language_models::llm::LLM,
+    schemas::Document,
+    vectorstore::{VecStoreOptions, VectorStore},
 };
 
 pub struct Store {
@@ -195,7 +197,8 @@ impl VectorStore for Store {
         opt: &VecStoreOptions,
     ) -> Result<Vec<Document>, Box<dyn Error>> {
         let table = &self.table;
-        let openai =  &self.llm;
+        let table = table;
+        let openai = &self.llm;
         let prompt = format!(
             r#"
             {{
@@ -214,7 +217,7 @@ impl VectorStore for Store {
             }}"#,
             query.to_string()
         );
-        let ai_bm25_response  = openai.invoke(&prompt).await.unwrap_or_else(|err| {
+        let ai_bm25_response = openai.invoke(&prompt).await.unwrap_or_else(|err| {
             eprintln!("prepare sql error: {}", err);
             query.to_string()
         });
@@ -222,25 +225,29 @@ impl VectorStore for Store {
             .chars()
             .map(|c| if c.is_alphanumeric() { c } else { ' ' })
             .collect::<String>();
-        
+
         println!("bm25 key word: {}", bm25_query);
 
         let query_vector_json = json!(self.embedder.embed_query(query).await?).to_string();
         let db = self.pool.lock().unwrap();
-        
+
         let filter = self.get_filters(opt)?;
         let mut metadata_query = filter
-        .iter()
-        .map(|(k, v)| format!("json_extract(e.metadata, '$.{}') = '{}'", k, v))
-        .collect::<Vec<String>>()
-        .join(" AND ");
+            .iter()
+            .map(|(k, v)| format!("json_extract(e.metadata, '$.{}') = '{}'", k, v))
+            .collect::<Vec<String>>()
+            .join(" AND ");
 
         if metadata_query.is_empty() {
             metadata_query = "1 = 1".to_string();
         }
-        
-       
 
+        let mut vec_limit = 0;
+        let mut bm25_limit = 0;
+        if limit == 7 {
+            vec_limit = 5;
+            bm25_limit = 2;
+        }
         let query_sql = &format!(
             r#"
             with vec_matches as (
@@ -253,7 +260,7 @@ impl VectorStore for Store {
                     vec_{table}
                 where
                     text_embedding match ?
-                    and k = {limit} and  {metadata_query}
+                    and k = {vec_limit} and  {metadata_query}
                 order by
                     distance
                 ),
@@ -261,13 +268,13 @@ impl VectorStore for Store {
                 select
                     rowid,
                     row_number() OVER (ORDER BY rank) AS row_number,
-                    rank AS score
+                     ABS(rank) AS score
                 from
                     bm25_{table}
                 where
                     bm25_{table} match ?
                     order by score
-                    limit {limit}
+                    limit {bm25_limit}
                 ),
             final as (
                     SELECT
@@ -288,29 +295,41 @@ impl VectorStore for Store {
             "#,
         );
         let mut stmt = db.prepare(query_sql)?;
-        
+
         let docs = stmt
-            .query_map(
-                params![query_vector_json,bm25_query],
-                |row| {
-                    let page_content: String = row.get("text")?;
-                    let metadata_json: String = row.get("metadata")?;
-                    let score: f64 = row.get::<_, Option<f64>>("combined_score")?.unwrap_or_default();
-                    let vec_score: f64 = row.get::<_, Option<f64>>("vec_score")?.unwrap_or_default();
-                    let bm25_score: f64 = row.get::<_, Option<f64>>("bm25_score")?.unwrap_or_default();
-                    let mut metadata: HashMap<String, Value> =
-                        serde_json::from_str(&metadata_json).unwrap();
-                    metadata.insert("bm25_score".to_string(), json!(bm25_score));
-                    metadata.insert("vec_score".to_string(), json!(vec_score));
-                    Ok(Document {
-                        page_content,
-                        metadata,
-                        score,
-                    })
-                },
-            )?
+            .query_map(params![query_vector_json, bm25_query], |row| {
+                let page_content: String = row.get("text")?;
+                let metadata_json: String = row.get("metadata")?;
+                let score: f64 = row
+                    .get::<_, Option<f64>>("combined_score")?
+                    .unwrap_or_default();
+                let vec_score: f64 = row.get::<_, Option<f64>>("vec_score")?.unwrap_or_default();
+                let bm25_score: f64 = row.get::<_, Option<f64>>("bm25_score")?.unwrap_or_default();
+                let mut metadata: HashMap<String, Value> =
+                    serde_json::from_str(&metadata_json).unwrap();
+                metadata.insert("bm25_score".to_string(), json!(bm25_score));
+                metadata.insert("vec_score".to_string(), json!(vec_score));
+                Ok(Document {
+                    page_content,
+                    metadata,
+                    score,
+                })
+            })?
             .collect::<Result<Vec<Document>, rusqlite::Error>>()?;
-        Ok(docs)
+        
+        let mut vec_docs = docs.clone();
+        vec_docs.sort_by(|a, b| b.metadata["vec_score"].as_f64().unwrap().partial_cmp(&a.metadata["vec_score"].as_f64().unwrap()).unwrap());
+        let top_vec_docs = vec_docs.into_iter().take(vec_limit).collect::<Vec<_>>();
+
+        let mut bm25_docs = docs.clone();
+        bm25_docs.sort_by(|a, b| b.metadata["bm25_score"].as_f64().unwrap().partial_cmp(&a.metadata["bm25_score"].as_f64().unwrap()).unwrap());
+        let top_bm25_docs = bm25_docs.into_iter().take(bm25_limit).collect::<Vec<_>>();
+
+        let mut combined_docs = top_vec_docs;
+        combined_docs.extend(top_bm25_docs);
+        
+        Ok(combined_docs)
+  
     }
 }
 
