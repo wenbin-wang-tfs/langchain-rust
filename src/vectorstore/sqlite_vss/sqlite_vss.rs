@@ -221,10 +221,11 @@ impl VectorStore for Store {
             eprintln!("prepare sql error: {}", err);
             query.to_string()
         });
-        let bm25_query = ai_bm25_response
-            .chars()
-            .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-            .collect::<String>();
+        
+        let bm25_query =  format!(
+            r#""{}""#,
+            ai_bm25_response.to_string()
+        ).to_string();
 
         println!("bm25 key word: {}", bm25_query);
 
@@ -245,7 +246,7 @@ impl VectorStore for Store {
         let mut vec_limit = 0;
         let mut bm25_limit = 0;
         if limit == 7 {
-            vec_limit = 5;
+            vec_limit = 7;
             bm25_limit = 2;
         }
         let query_sql = &format!(
@@ -299,16 +300,18 @@ impl VectorStore for Store {
         let docs = stmt
             .query_map(params![query_vector_json, bm25_query], |row| {
                 let page_content: String = row.get("text")?;
-                let metadata_json: String = row.get("metadata")?;
+                let metadata_json: String = row.get("metadata")?;             
                 let score: f64 = row
                     .get::<_, Option<f64>>("combined_score")?
                     .unwrap_or_default();
                 let vec_score: f64 = row.get::<_, Option<f64>>("vec_score")?.unwrap_or_default();
                 let bm25_score: f64 = row.get::<_, Option<f64>>("bm25_score")?.unwrap_or_default();
+                let rowid: f64 = row.get::<_, Option<f64>>("rowid")?.unwrap_or_default();
                 let mut metadata: HashMap<String, Value> =
                     serde_json::from_str(&metadata_json).unwrap();
                 metadata.insert("bm25_score".to_string(), json!(bm25_score));
                 metadata.insert("vec_score".to_string(), json!(vec_score));
+                metadata.insert("rowid".to_string(), json!(rowid));
                 Ok(Document {
                     page_content,
                     metadata,
