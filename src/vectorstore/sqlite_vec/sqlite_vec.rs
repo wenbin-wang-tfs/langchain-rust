@@ -108,32 +108,83 @@ impl Store {
         Ok(())
     }
 
-    pub async fn delete_all_documents(&self) -> Result<(), Box<dyn Error>> {
+    pub async fn delete_documents_by_metadata(
+        &self,
+        metadata_filters: &HashMap<String, Value>,
+    ) -> Result<(), Box<dyn Error>> {
+        if metadata_filters.is_empty() {
+            return Ok(());
+        }
+
         let table = &self.table;
         let mut db = self.pool.lock().unwrap();
         let tx = db.transaction()?;
 
-        tx.execute(
-            &format!(
-                r#"
-            DELETE FROM {table}
-            "#
-            ),
-            (),
-        )?;
+        // 构建 metadata 过滤条件
+        let metadata_conditions = metadata_filters
+            .iter()
+            .map(|(k, v)| match v {
+                Value::Array(arr) => {
+                    let values: Vec<String> =
+                        arr.iter().map(|val| json!(val).to_string()).collect();
+                    format!(
+                        "json_extract(metadata, '$.{}') IN ({})",
+                        k,
+                        values.join(",")
+                    )
+                }
+                Value::String(s) => {
+                    let json_value = json!(s).to_string();
+                    format!("json_extract(metadata, '$.{}') = {}", k, json_value)
+                }
+                Value::Number(n) => {
+                    format!("json_extract(metadata, '$.{}') = {}", k, n)
+                }
+                Value::Bool(b) => {
+                    format!("json_extract(metadata, '$.{}') = {}", k, b)
+                }
+                _ => {
+                    let json_value = json!(v).to_string();
+                    format!("json_extract(metadata, '$.{}') = {}", k, json_value)
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" AND ");
 
+        // 删除主表中符合条件的记录
+        let main_sql = format!(
+            r#"DELETE FROM {table}
+            WHERE {}"#,
+            metadata_conditions
+        );
+        tx.execute(&main_sql, ())?;
+
+        // 同步删除向量表中的相关记录
         let vec_table = format!("vec_{}", table);
-        tx.execute(
-            &format!(
-                r#"
-            DELETE FROM {vec_table}
-            "#
-            ),
-            (),
-        )?;
+        let vec_sql = format!(
+            r#"DELETE FROM {vec_table}
+            WHERE rowid NOT IN (SELECT rowid FROM {table})"#
+        );
+        tx.execute(&vec_sql, ())?;
 
         tx.commit()?;
+        Ok(())
+    }
 
+    pub async fn delete_all_documents(&self) -> Result<(), Box<dyn Error>> {
+        if !self.table.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            return Err("Invalid table name".into());
+        }
+
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
+
+        tx.execute(&format!("DELETE FROM {}", self.table), ())?;
+
+        let vec_table = format!("vec_{}", self.table);
+        tx.execute(&format!("DELETE FROM {}", vec_table), ())?;
+
+        tx.commit()?;
         Ok(())
     }
 }

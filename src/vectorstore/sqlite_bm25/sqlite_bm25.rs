@@ -73,6 +73,54 @@ impl Store {
         Ok(())
     }
 
+    pub async fn delete_documents_by_metadata(
+        &self,
+        metadata_filters: &HashMap<String, Value>,
+    ) -> Result<(), Box<dyn Error>> {
+        let table = &self.table;
+        let db = self.pool.lock().unwrap();
+
+        let metadata_query = metadata_filters
+            .iter()
+            .map(|(k, v)| match v {
+                Value::Array(arr) => {
+                    let values: Vec<String> =
+                        arr.iter().map(|val| json!(val).to_string()).collect();
+                    format!(
+                        "json_extract(metadata, '$.{}') IN ({})",
+                        k,
+                        values.join(",")
+                    )
+                }
+                Value::String(s) => {
+                    let json_value = json!(s).to_string();
+                    format!("json_extract(metadata, '$.{}') = {}", k, json_value)
+                }
+                Value::Number(n) => {
+                    format!("json_extract(metadata, '$.{}') = {}", k, n)
+                }
+                Value::Bool(b) => {
+                    format!("json_extract(metadata, '$.{}') = {}", k, b)
+                }
+                _ => {
+                    let json_value = json!(v).to_string();
+                    format!("json_extract(metadata, '$.{}') = {}", k, json_value)
+                }
+            })
+            .collect::<Vec<String>>()
+            .join(" AND ");
+
+        let where_clause = if metadata_query.is_empty() {
+            "1=1".to_string()
+        } else {
+            metadata_query
+        };
+
+        db.execute(&format!(r#"DELETE FROM {table} WHERE {where_clause}"#), [])?;
+
+        Ok(())
+    }
+
     pub async fn delete_all_documents(&self) -> Result<(), Box<dyn Error>> {
         let table = &self.table;
         let db = self.pool.lock().unwrap();
