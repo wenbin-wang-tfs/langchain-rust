@@ -1,8 +1,12 @@
-use std::{collections::HashMap, error::Error, sync::Arc};
+use std::{
+    collections::HashMap,
+    error::Error,
+    sync::{Arc, Mutex},
+};
 
 use async_trait::async_trait;
+use rusqlite::{params, params_from_iter};
 use serde_json::{json, Value};
-use sqlx::{Pool, Row, Sqlite};
 
 use crate::{
     embedding::embedder_trait::Embedder,
@@ -11,7 +15,7 @@ use crate::{
 };
 
 pub struct Store {
-    pub pool: Pool<Sqlite>,
+    pub pool: Arc<Mutex<rusqlite::Connection>>,
     pub(crate) table: String,
     pub(crate) vector_dimensions: i32,
     pub(crate) embedder: Arc<dyn Embedder>,
@@ -25,9 +29,11 @@ impl Store {
 
     async fn create_table_if_not_exists(&self) -> Result<(), Box<dyn Error>> {
         let table = &self.table;
+        let db = &self.pool.lock().unwrap();
 
-        sqlx::query(&format!(
-            r#"
+        db.execute(
+            &format!(
+                r#"
                 CREATE TABLE IF NOT EXISTS {table}
                 (
                   rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,37 +41,34 @@ impl Store {
                   metadata BLOB,
                   text_embedding BLOB
                 )
-                ;
-                "#
-        ))
-        .execute(&self.pool)
-        .await?;
+                ;"#
+            ),
+            (),
+        )?;
 
         let dimensions = self.vector_dimensions;
-        sqlx::query(&format!(
-            r#"
+        db.execute(
+            &format!(
+                r#"
                 CREATE VIRTUAL TABLE IF NOT EXISTS vec_{table} USING vec0(
                   text_embedding float[{dimensions}]
-                );
-                "#
-        ))
-        .execute(&self.pool)
-        .await?;
+                );"#
+            ),
+            (),
+        )?;
 
-        // NOTE: python langchain seems to only use "embed_text" as the trigger name
-        sqlx::query(&format!(
-            r#"
+        db.execute(
+            &format!(
+                r#"
                 CREATE TRIGGER IF NOT EXISTS embed_text_{table}
                 AFTER INSERT ON {table}
                 BEGIN
                     INSERT INTO vec_{table}(rowid, text_embedding)
-                    VALUES (new.rowid, new.text_embedding)
-                    ;
-                END;
-                "#
-        ))
-        .execute(&self.pool)
-        .await?;
+                    VALUES (new.rowid, new.text_embedding);
+                END;"#
+            ),
+            (),
+        )?;
 
         Ok(())
     }
@@ -73,13 +76,65 @@ impl Store {
     fn get_filters(&self, opt: &VecStoreOptions) -> Result<HashMap<String, Value>, Box<dyn Error>> {
         match &opt.filters {
             Some(Value::Object(map)) => {
-                // Convert serde_json Map to HashMap<String, Value>
                 let filters = map.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                 Ok(filters)
             }
-            None => Ok(HashMap::new()), // No filters provided
-            _ => Err("Invalid filters format".into()), // Filters provided but not in the expected format
+            None => Ok(HashMap::new()),
+            _ => Err("Invalid filters format".into()),
         }
+    }
+
+    pub async fn delete_documents_by_ids(&self, ids: &[i64]) -> Result<(), Box<dyn Error>> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+
+        let table = &self.table;
+        let placeholders = (1..=ids.len())
+            .map(|i| format!("?{}", i))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
+
+        let main_sql = format!(r#"DELETE FROM {table} WHERE rowid IN ({placeholders})"#);
+        tx.execute(&main_sql, params_from_iter(ids))?;
+
+        let vec_table = format!("vec_{}", table);
+        let vec_sql = format!(r#"DELETE FROM {vec_table} WHERE rowid IN ({placeholders})"#);
+        tx.execute(&vec_sql, params_from_iter(ids))?;
+
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub async fn delete_all_documents(&self) -> Result<(), Box<dyn Error>> {
+        let table = &self.table;
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
+
+        tx.execute(
+            &format!(
+                r#"
+            DELETE FROM {table}
+            "#
+            ),
+            (),
+        )?;
+
+        let vec_table = format!("vec_{}", table);
+        tx.execute(
+            &format!(
+                r#"
+            DELETE FROM {vec_table}
+            "#
+            ),
+            (),
+        )?;
+
+        tx.commit()?;
+
+        Ok(())
     }
 }
 
@@ -91,10 +146,9 @@ impl VectorStore for Store {
         opt: &VecStoreOptions,
     ) -> Result<Vec<String>, Box<dyn Error>> {
         let texts: Vec<String> = docs.iter().map(|d| d.page_content.clone()).collect();
-
         let embedder = opt.embedder.as_ref().unwrap_or(&self.embedder);
-
         let vectors = embedder.embed_documents(&texts).await?;
+
         if vectors.len() != docs.len() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -103,32 +157,33 @@ impl VectorStore for Store {
         }
 
         let table = &self.table;
-
-        let mut tx = self.pool.begin().await?;
-
+        let mut db = self.pool.lock().unwrap();
+        let tx = db.transaction()?;
         let mut ids = Vec::with_capacity(docs.len());
 
         for (doc, vector) in docs.iter().zip(vectors.iter()) {
-            let text_embedding = json!(&vector);
-            let id = sqlx::query(&format!(
-                r#"
+            let text_embedding = json!(vector).to_string();
+            let id: i64 = tx.query_row(
+                &format!(
+                    r#"
                     INSERT INTO {table}
                         (text, metadata, text_embedding)
                     VALUES
-                        (?,?,?)"#
-            ))
-            .bind(&doc.page_content)
-            .bind(json!(&doc.metadata))
-            .bind(text_embedding.to_string())
-            .execute(&mut *tx)
-            .await?
-            .last_insert_rowid();
+                        (?1, ?2, ?3)
+                    RETURNING rowid"#
+                ),
+                params![
+                    &doc.page_content,
+                    &json!(&doc.metadata).to_string(),
+                    &text_embedding
+                ],
+                |row| row.get(0),
+            )?;
 
             ids.push(id.to_string());
         }
 
-        tx.commit().await?;
-
+        tx.commit()?;
         Ok(ids)
     }
 
@@ -139,58 +194,91 @@ impl VectorStore for Store {
         opt: &VecStoreOptions,
     ) -> Result<Vec<Document>, Box<dyn Error>> {
         let table = &self.table;
-
-        let query_vector = json!(self.embedder.embed_query(query).await?);
+        let query_vector_json = json!(self.embedder.embed_query(query).await?).to_string();
+        let db = self.pool.lock().unwrap();
 
         let filter = self.get_filters(opt)?;
-
         let mut metadata_query = filter
             .iter()
-            .map(|(k, v)| format!("json_extract(e.metadata, '$.{}') = '{}'", k, v))
+            .map(|(k, v)| match v {
+                Value::Array(arr) => {
+                    let values: Vec<String> =
+                        arr.iter().map(|val| json!(val).to_string()).collect();
+                    format!(
+                        "json_extract(e.metadata, '$.{}') IN ({})",
+                        k,
+                        values.join(",")
+                    )
+                }
+                Value::String(s) => {
+                    let json_value = json!(s).to_string();
+                    format!("json_extract(e.metadata, '$.{}') = {}", k, json_value)
+                }
+                Value::Number(n) => {
+                    format!("json_extract(e.metadata, '$.{}') = {}", k, n)
+                }
+                Value::Bool(b) => {
+                    format!("json_extract(e.metadata, '$.{}') = {}", k, b)
+                }
+                _ => {
+                    let json_value = json!(v).to_string();
+                    format!("json_extract(e.metadata, '$.{}') = {}", k, json_value)
+                }
+            })
             .collect::<Vec<String>>()
             .join(" AND ");
 
         if metadata_query.is_empty() {
-            metadata_query = "TRUE".to_string();
+            metadata_query = "1 = 1".to_string();
         }
 
-        let rows = sqlx::query(&format!(
+        println!("Executing query with metadata filter: {}", metadata_query);
+
+        let mut stmt = db.prepare(&format!(
             r#"SELECT
-                    text,
-                    metadata,
-                    distance
-                FROM {table} e
-                INNER JOIN vec_{table} v on v.rowid = e.rowid
-                WHERE v.text_embedding match '{query_vector}' AND k = ? AND {metadata_query}
-                ORDER BY distance
-                LIMIT ?"#
-        ))
-        .bind(limit as i32)
-        .bind(limit as i32)
-        .fetch_all(&self.pool)
-        .await?;
+                e.text,
+                e.metadata,
+                v.distance
+            FROM {table} e
+            INNER JOIN vec_{table} v on v.rowid = e.rowid
+            WHERE v.text_embedding match ?1 AND k = ?2 AND {metadata_query}
+            ORDER BY distance
+            LIMIT ?3"#
+        ))?;
 
-        let docs = rows
+        let doubled_limit = limit * 2;
+        let docs = stmt
+            .query_map(
+                params![query_vector_json, limit as i32, doubled_limit as i32],
+                |row| {
+                    let page_content: String = row.get(0)?;
+                    let metadata_json: String = row.get(1)?;
+                    let distance: f64 = row.get(2)?;
+                    let score = 1.0 / (1.0 + distance);
+                    let metadata: HashMap<String, Value> =
+                        serde_json::from_str(&metadata_json).unwrap();
+
+                    Ok(Document {
+                        page_content,
+                        metadata,
+                        score,
+                    })
+                },
+            )?
+            .collect::<Result<Vec<Document>, rusqlite::Error>>()?;
+
+        let mut seen = std::collections::HashSet::new();
+        let mut unique_docs: Vec<Document> = docs
             .into_iter()
-            .map(|row| {
-                let page_content: String = row.try_get("text")?;
-                let metadata_json: Value = row.try_get("metadata")?;
-                let score: f64 = row.try_get("distance")?;
-
-                let metadata = if let Value::Object(obj) = metadata_json {
-                    obj.into_iter().collect()
-                } else {
-                    HashMap::new() // Or handle this case as needed
-                };
-
-                Ok(Document {
-                    page_content,
-                    metadata,
-                    score,
-                })
+            .filter(|doc| {
+                let key = format!("{}{}", doc.page_content, json!(doc.metadata));
+                seen.insert(key)
             })
-            .collect::<Result<Vec<Document>, sqlx::Error>>()?;
+            .collect();
 
-        Ok(docs)
+        unique_docs.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        unique_docs.truncate(limit);
+
+        Ok(unique_docs)
     }
 }

@@ -2,33 +2,26 @@
 // To run this example execute: cargo run --example vector_store_sqlite_vec --features sqlite-vec
 // Download the libraries from https://github.com/asg017/sqlite-vec
 
-#[cfg(feature = "sqlite-vec")]
-use langchain_rust::{
-    embedding::openai::openai_embedder::OpenAiEmbedder,
-    schemas::Document,
-    vectorstore::{sqlite_vec::StoreBuilder, VecStoreOptions, VectorStore},
-};
+#[cfg(feature = "sqlite-bm25")]
+use langchain_rust::vectorstore::{sqlite_bm25::StoreBuilder, VecStoreOptions, VectorStore};
 
-#[cfg(feature = "sqlite-vec")]
+#[cfg(feature = "sqlite-bm25")]
 use std::io::Write;
 
-#[cfg(feature = "sqlite-vec")]
+#[cfg(feature = "sqlite-bm25")]
 #[tokio::main]
 async fn main() {
     // Initialize Embedder
 
-    use langchain_rust::llm::AzureConfig;
+    use langchain_rust::schemas::Document;
     use serde_json::json;
-    let embedder = OpenAiEmbedder::default();
 
     let database_url = std::env::var("DATABASE_URL").unwrap_or("sqlite::memory:".to_string());
 
     // Initialize the Sqlite Vector Store
     let store = StoreBuilder::new()
-        .embedder(embedder)
         .connection_url(database_url)
         .table("table_name")
-        .vector_dimensions(3072)
         .build()
         .await
         .unwrap();
@@ -37,21 +30,21 @@ async fn main() {
     store.initialize().await.unwrap();
 
     // Add documents to the database
-    // let doc1 = Document::new(
-    //     "langchain-rust is a port of the langchain python library to rust and was written in 2024.",
-    // );
-    // let doc2 = Document::new(
-    //     "langchaingo is a port of the langchain python library to go language and was written in 2023."
-    // );
-    // let doc3 = Document::new(
-    //     "Capital of United States of America (USA) is Washington D.C. and the capital of France is Paris."
-    // );
-    // let doc4 = Document::new("Capital of France is Paris.");
+    let doc1 = Document::new(
+        "langchain-rust is a port of the langchain python library to rust and was written in 2024.",
+    );
+    let doc2 = Document::new(
+        "langchaingo is a port of the langchain python library to go language and was written in 2023."
+    );
+    let doc3 = Document::new(
+        "Capital of United States of America (USA) is Washington D.C. and the capital of France is Paris."
+    );
+    let doc4 = Document::new("Capital of France is Paris.");
 
-    // store
-    //     .add_documents(&vec![doc1, doc2, doc3, doc4], &VecStoreOptions::default())
-    //     .await
-    //     .unwrap();
+    store
+        .add_documents(&vec![doc1, doc2, doc3, doc4], &VecStoreOptions::default())
+        .await
+        .unwrap();
 
     // Ask for user input
     print!("Query> ");
@@ -61,7 +54,10 @@ async fn main() {
     let option: VecStoreOptions = VecStoreOptions::default()
         .with_filters(json!({"file_name": ["New Chemical Website Project Overview.pptx", "China Concur 培训文档.pptx"]}));
 
-    let results = store.similarity_search(&query, 5, &option).await.unwrap();
+    let results = store
+        .similarity_search(&query, 5, &VecStoreOptions::default())
+        .await
+        .unwrap();
 
     if results.is_empty() {
         println!("No results found.");

@@ -80,14 +80,14 @@ ollama-rs = { version = "0.2.0", optional = true, features = [
     "stream",
     "chat-history",
 ] }
-sqlite-vec = "0.1.2"
+sqlite-vec = "0.1.6"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 mistralai-client = { version = "0.14.0", optional = true }
 
 
 [features]
-# default = ["sqlite-vec","sqlite-vss","pdf-extract","lopdf"]
-default=[]
+default = ["sqlite-vec","sqlite-vss","pdf-extract","lopdf","sqlite-bm25"]
+# default=[]
 fastembed = ["dep:fastembed"]
 git = ["gix", "flume"]
 html-to-markdown = ["dep:htmd"]
@@ -100,6 +100,7 @@ postgres = ["pgvector", "sqlx", "uuid"]
 qdrant = ["qdrant-client", "uuid"]
 sqlite-vss = ["sqlx"]
 sqlite-vec = ["sqlx"]
+sqlite-bm25 = ["sqlx"]
 surrealdb = ["dep:surrealdb"]
 tree-sitter = [
     "cc",

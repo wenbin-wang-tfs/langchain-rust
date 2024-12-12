@@ -9,6 +9,9 @@ pub mod sqlite_vss;
 #[cfg(feature = "sqlite-vec")]
 pub mod sqlite_vec;
 
+#[cfg(feature = "sqlite-bm25")]
+pub mod sqlite_bm25;
+
 #[cfg(feature = "surrealdb")]
 pub mod surrealdb;
 

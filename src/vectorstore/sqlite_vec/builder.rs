@@ -1,15 +1,16 @@
-use std::{error::Error, str::FromStr, sync::Arc};
-
-use sqlx::{
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-    Pool, Sqlite,
+use std::{
+    error::Error,
+    sync::{Arc, Mutex},
 };
+
+use rusqlite::{ffi::sqlite3_auto_extension, Connection, Result};
+use sqlite_vec::sqlite3_vec_init;
 
 use super::Store;
 use crate::embedding::embedder_trait::Embedder;
 
 pub struct StoreBuilder {
-    pool: Option<Pool<Sqlite>>,
+    pool: Option<Arc<Mutex<rusqlite::Connection>>>,
     connection_url: Option<String>,
     table: String,
     vector_dimensions: i32,
@@ -27,7 +28,7 @@ impl StoreBuilder {
         }
     }
 
-    pub fn pool(mut self, pool: Pool<Sqlite>) -> Self {
+    pub fn pool(mut self, pool: Arc<Mutex<rusqlite::Connection>>) -> Self {
         self.pool = Some(pool);
         self.connection_url = None;
         self
@@ -54,7 +55,6 @@ impl StoreBuilder {
         self
     }
 
-    // Finalize the builder and construct the Store object
     pub async fn build(self) -> Result<Store, Box<dyn Error>> {
         if self.embedder.is_none() {
             return Err("Embedder is required".into());
@@ -68,25 +68,25 @@ impl StoreBuilder {
         })
     }
 
-    async fn get_pool(&self) -> Result<Pool<Sqlite>, Box<dyn Error>> {
-        match &self.pool {
-            Some(pool) => Ok(pool.clone()),
-            None => {
-                let connection_url = self
-                    .connection_url
-                    .as_ref()
-                    .ok_or("Connection URL or DB is required")?;
-
-                let pool: Pool<Sqlite> = SqlitePoolOptions::new()
-                    .connect_with(
-                        SqliteConnectOptions::from_str(connection_url)?
-                            .create_if_missing(true)
-                            .extension("vec0"),
-                    )
-                    .await?;
-
-                Ok(pool)
-            }
+    async fn get_pool(&self) -> Result<Arc<Mutex<rusqlite::Connection>>, Box<dyn Error>> {
+        if let Some(pool) = &self.pool {
+            return Ok(pool.clone());
         }
+
+        unsafe {
+            sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+        }
+
+        let connection_url = self
+            .connection_url
+            .as_ref()
+            .ok_or_else(|| "Connection URL or DB is required")?;
+
+        let pool: rusqlite::Connection = Connection::open(connection_url)
+            .map_err(|e| format!("Failed to open SQLite connection: {}", e))?;
+
+        let pool = Arc::new(Mutex::new(pool));
+
+        Ok(pool)
     }
 }

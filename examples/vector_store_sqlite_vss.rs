@@ -18,27 +18,25 @@ use std::io::Write;
 async fn main() {
     // Initialize Embedder
 
+    use langchain_rust::language_models::llm::LLM;
     use langchain_rust::llm::{AzureConfig, OpenAI};
-    use langchain_rust::{
-        language_models::llm::LLM,
-    };
 
     let azure_config = AzureConfig::default();
-       
+
     let embedder = OpenAiEmbedder::new(azure_config);
 
     let azure_config = AzureConfig::default();
-       
+
     let open_ai = OpenAI::new(azure_config);
 
-    // let database_url = std::env::var();
+    let database_url = std::env::var("DATABASE_URL").unwrap_or("sqlite::memory:".to_string());
 
     // Initialize the Sqlite Vector Store
     let store = StoreBuilder::new()
         .embedder(embedder)
         .llm(open_ai)
-        .connection_url("/Users/zhaoxin.jia/Library/Application Support/com.thermofisher.geneaiapac.assistant/vector_store.db")
-        .table("documentstest1")
+        .connection_url(database_url)
+        .table("table_name")
         .vector_dimensions(3072)
         .build()
         .await
@@ -71,7 +69,11 @@ async fn main() {
     // std::io::stdin().read_line(&mut query).unwrap();
 
     let results = store
-        .similarity_search("how can i use langchain rust", 4, &VecStoreOptions::default())
+        .similarity_search(
+            "how can i use langchain rust",
+            4,
+            &VecStoreOptions::default(),
+        )
         .await
         .unwrap_or_else(|err| {
             eprintln!("Error during similarity search: {}", err);
@@ -83,7 +85,7 @@ async fn main() {
         return;
     } else {
         results.iter().for_each(|r| {
-            println!("Document: {},combined_score:{}", r.page_content,r.score);
+            println!("Document: {},combined_score:{}", r.page_content, r.score);
             if let Some(vec_score) = r.metadata.get("vec_score") {
                 println!("combined_score: {}", vec_score);
             }
