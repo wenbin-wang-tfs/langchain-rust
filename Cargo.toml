@@ -98,9 +98,9 @@ ollama = ["ollama-rs"]
 opensearch = ["dep:opensearch", "aws-config"]
 postgres = ["pgvector", "sqlx", "uuid"]
 qdrant = ["qdrant-client", "uuid"]
-sqlite-hybrid = ["sqlx"]
-sqlite-vec = ["sqlx"]
-sqlite-bm25 = ["sqlx"]
+sqlite-hybrid = []
+sqlite-vec = []
+sqlite-bm25 = []
 surrealdb = ["dep:surrealdb"]
 tree-sitter = [
     "cc",
