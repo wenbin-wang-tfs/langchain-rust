@@ -4,19 +4,19 @@
 // For static compilation of sqlite-vss extension refer to the following link:
 // https://github.com/launchbadge/sqlx/issues/3147.
 
-#[cfg(feature = "sqlite_hybrid")]
+#[cfg(feature = "sqlite-hybrid")]
 use futures_util::StreamExt;
-#[cfg(feature = "sqlite_hybrid")]
+#[cfg(feature = "sqlite-hybrid")]
 use langchain_rust::{
     document_loaders::GitCommitLoader,
     document_loaders::Loader,
     embedding::openai::OpenAiEmbedder,
     vectorstore::{sqlite_hybrid::StoreBuilder, VecStoreOptions, VectorStore},
 };
-#[cfg(feature = "sqlite_hybrid")]
+#[cfg(feature = "sqlite-hybrid")]
 use std::io::Write;
 
-#[cfg(feature = "sqlite_hybrid")]
+#[cfg(feature = "sqlite-hybrid")]
 #[tokio::main]
 async fn main() {
     // Initialize Embedder
@@ -77,7 +77,7 @@ async fn main() {
     }
 }
 
-#[cfg(not(feature = "sqlite_hybrid"))]
+#[cfg(not(feature = "sqlite-hybrid"))]
 fn main() {
     println!("This example requires the 'sqlite-vss' and 'git' feature to be enabled.");
     println!("Please run the command as follows:");

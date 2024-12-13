@@ -96,7 +96,7 @@ async fn main() {
     }
 }
 
-#[cfg(not(feature = "sqlite_hybrid"))]
+#[cfg(not(feature = "sqlite-hybrid"))]
 fn main() {
     println!("This example requires the 'sqlite-vss' feature to be enabled.");
     println!("Please run the command as follows:");
