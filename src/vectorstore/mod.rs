@@ -3,8 +3,8 @@ mod options;
 #[cfg(feature = "postgres")]
 pub mod pgvector;
 
-#[cfg(feature = "sqlite-vss")]
-pub mod sqlite_vss;
+#[cfg(feature = "sqlite_hybrid")]
+pub mod sqlite_hybrid;
 
 #[cfg(feature = "sqlite-vec")]
 pub mod sqlite_vec;

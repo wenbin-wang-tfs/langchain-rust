@@ -15,7 +15,6 @@ pub struct StoreBuilder {
     table: String,
     vector_dimensions: i32,
     embedder: Option<Arc<dyn Embedder>>,
-    llm: Option<Arc<dyn LLM>>,
 }
 
 impl StoreBuilder {
@@ -26,7 +25,6 @@ impl StoreBuilder {
             table: "documents".to_string(),
             vector_dimensions: 0,
             embedder: None,
-            llm: None,
         }
     }
 
@@ -57,11 +55,6 @@ impl StoreBuilder {
         self
     }
 
-    pub fn llm<E: LLM + 'static>(mut self, llm: E) -> Self {
-        self.llm = Some(Arc::new(llm));
-        self
-    }
-
     pub async fn build(self) -> Result<Store, Box<dyn Error>> {
         if self.embedder.is_none() {
             return Err("Embedder is required".into());
@@ -72,7 +65,6 @@ impl StoreBuilder {
             table: self.table,
             vector_dimensions: self.vector_dimensions,
             embedder: self.embedder.unwrap(),
-            llm: self.llm.unwrap(),
         })
     }
 
