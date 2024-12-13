@@ -86,8 +86,8 @@ mistralai-client = { version = "0.14.0", optional = true }
 
 
 [features]
-default = ["sqlite-vec","sqlite_hybrid","pdf-extract","lopdf","sqlite-bm25"]
-# default=[]
+# default = ["sqlite-vec","sqlite_hybrid","pdf-extract","lopdf","sqlite-bm25"]
+default=[]
 fastembed = ["dep:fastembed"]
 git = ["gix", "flume"]
 html-to-markdown = ["dep:htmd"]
