@@ -1,4 +1,4 @@
-use text_splitter::ChunkConfig;
+use text_splitter::{ChunkCapacity, ChunkConfig};
 use tiktoken_rs::{get_bpe_from_model, get_bpe_from_tokenizer, tokenizer::Tokenizer, CoreBPE};
 
 use super::TextSplitterError;
@@ -6,7 +6,7 @@ use super::TextSplitterError;
 // Options is a struct that contains options for a text splitter.
 #[derive(Debug, Clone)]
 pub struct SplitterOptions {
-    pub chunk_size: usize,
+    pub chunk_size: ChunkCapacity,
     pub chunk_overlap: usize,
     pub model_name: String,
     pub encoding_name: String,
@@ -22,7 +22,7 @@ impl Default for SplitterOptions {
 impl SplitterOptions {
     pub fn new() -> Self {
         SplitterOptions {
-            chunk_size: 512,
+            chunk_size: ChunkCapacity::new(512),
             chunk_overlap: 0,
             model_name: String::from("gpt-3.5-turbo"),
             encoding_name: String::from("cl100k_base"),
@@ -33,8 +33,8 @@ impl SplitterOptions {
 
 // Builder pattern for Options struct
 impl SplitterOptions {
-    pub fn with_chunk_size(mut self, chunk_size: usize) -> Self {
-        self.chunk_size = chunk_size;
+    pub fn with_chunk_size(mut self, chunk_size: impl Into<ChunkCapacity>) -> Self {
+        self.chunk_size = chunk_size.into();
         self
     }
 
@@ -82,7 +82,6 @@ impl TryFrom<&SplitterOptions> for ChunkConfig<CoreBPE> {
         } else {
             get_bpe_from_model(&options.model_name).map_err(|_| TextSplitterError::InvalidModel)?
         };
-
         Ok(ChunkConfig::new(options.chunk_size)
             .with_sizer(tk)
             .with_trim(options.trim_chunks)
