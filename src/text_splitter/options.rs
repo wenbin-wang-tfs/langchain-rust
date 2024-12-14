@@ -1,4 +1,4 @@
-use text_splitter::{ChunkCapacity, ChunkConfig};
+pub use text_splitter::{ChunkCapacity, ChunkConfig};
 use tiktoken_rs::{get_bpe_from_model, get_bpe_from_tokenizer, tokenizer::Tokenizer, CoreBPE};
 
 use super::TextSplitterError;
@@ -33,7 +33,10 @@ impl SplitterOptions {
 
 // Builder pattern for Options struct
 impl SplitterOptions {
-    pub fn with_chunk_size(mut self, chunk_size: impl Into<ChunkCapacity>) -> Self {
+    pub fn with_chunk_size<T>(mut self, chunk_size: T) -> Self
+    where
+        T: Into<ChunkCapacity>,
+    {
         self.chunk_size = chunk_size.into();
         self
     }
