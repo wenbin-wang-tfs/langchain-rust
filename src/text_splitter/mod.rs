@@ -5,6 +5,7 @@ mod plain_text_splitter;
 mod text_splitter;
 mod token_splitter;
 
+pub use ::text_splitter::{ChunkCapacity, ChunkConfig};
 pub use error::*;
 pub use markdown_splitter::*;
 pub use options::*;
