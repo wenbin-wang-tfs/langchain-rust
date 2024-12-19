@@ -7,13 +7,14 @@ use rusqlite::{ffi::sqlite3_auto_extension, Connection, Result};
 use sqlite_vec::sqlite3_vec_init;
 
 use super::Store;
-use crate::{embedding::embedder_trait::Embedder, language_models::llm::LLM};
+use crate::embedding::embedder_trait::Embedder;
 
 pub struct StoreBuilder {
     pool: Option<Arc<Mutex<rusqlite::Connection>>>,
     connection_url: Option<String>,
     table: String,
     vector_dimensions: i32,
+    batch_size: i32,
     embedder: Option<Arc<dyn Embedder>>,
 }
 
@@ -24,6 +25,7 @@ impl StoreBuilder {
             connection_url: None,
             table: "documents".to_string(),
             vector_dimensions: 0,
+            batch_size: 2048,
             embedder: None,
         }
     }
@@ -42,6 +44,11 @@ impl StoreBuilder {
 
     pub fn table(mut self, table: &str) -> Self {
         self.table = table.into();
+        self
+    }
+
+    pub fn batch_size(mut self, batch_size: i32) -> Self {
+        self.batch_size = batch_size;
         self
     }
 
@@ -64,6 +71,7 @@ impl StoreBuilder {
             pool: self.get_pool().await?,
             table: self.table,
             vector_dimensions: self.vector_dimensions,
+            batch_size: self.batch_size,
             embedder: self.embedder.unwrap(),
         })
     }

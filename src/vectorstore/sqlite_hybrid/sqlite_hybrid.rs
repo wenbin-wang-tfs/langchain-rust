@@ -18,6 +18,7 @@ pub struct Store {
     pub(crate) table: String,
     pub(crate) vector_dimensions: i32,
     pub(crate) embedder: Arc<dyn Embedder>,
+    pub(crate) batch_size: i32,
 }
 
 impl Store {
@@ -275,7 +276,7 @@ impl Store {
                 let raw_score: f64 = row.get(2)?;
 
                 // 将 BM25 分数转换为 0-1 范围
-                // BM25 分数通常是正数，越大表示越相关
+                // BM25 分数通常���正数，越大表示越相关
                 // 使用 sigmoid 函数进行归一化: 1 / (1 + e^(-score))
                 let score = 1.0 / (1.0 + (-raw_score).exp());
 
@@ -361,7 +362,16 @@ impl VectorStore for Store {
 
         let embedder = opt.embedder.as_ref().unwrap_or(&self.embedder);
 
-        let vectors = embedder.embed_documents(&texts).await?;
+        let batch_size = self.batch_size as usize;
+        let mut batches = texts.chunks(batch_size);
+
+        let mut vectors = Vec::with_capacity(docs.len());
+
+        while let Some(batch) = batches.next() {
+            let vector = embedder.embed_documents(batch).await?;
+            vectors.extend(vector);
+        }
+
         if vectors.len() != docs.len() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::Other,

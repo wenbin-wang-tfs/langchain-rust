@@ -14,6 +14,7 @@ pub struct StoreBuilder {
     connection_url: Option<String>,
     table: String,
     vector_dimensions: i32,
+    batch_size: i32,
     embedder: Option<Arc<dyn Embedder>>,
 }
 
@@ -24,6 +25,7 @@ impl StoreBuilder {
             connection_url: None,
             table: "documents".to_string(),
             vector_dimensions: 0,
+            batch_size: 2048,
             embedder: None,
         }
     }
@@ -50,6 +52,11 @@ impl StoreBuilder {
         self
     }
 
+    pub fn batch_size(mut self, batch_size: i32) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
     pub fn embedder<E: Embedder + 'static>(mut self, embedder: E) -> Self {
         self.embedder = Some(Arc::new(embedder));
         self
@@ -65,6 +72,7 @@ impl StoreBuilder {
             table: self.table,
             vector_dimensions: self.vector_dimensions,
             embedder: self.embedder.unwrap(),
+            batch_size: self.batch_size,
         })
     }
 
