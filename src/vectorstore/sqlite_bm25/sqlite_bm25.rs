@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use rusqlite::{params, params_from_iter};
 use serde_json::{json, Value};
-use sqlx::{Pool, Row, Sqlite};
 use std::{
     collections::HashMap,
     error::Error,
